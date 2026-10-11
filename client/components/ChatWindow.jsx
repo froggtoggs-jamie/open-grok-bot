@@ -7,7 +7,7 @@ import ModelPicker from './ModelPicker';
 import ToolsPopover from './ToolsPopover';
 import ContextMeter from './ContextMeter';
 import MascotAvatar from './MascotAvatar';
-import { FiPlus, FiMic, FiMicOff, FiMonitor, FiX, FiImage, FiEdit2 } from 'react-icons/fi';
+import { FiPlus, FiMic, FiMicOff, FiMonitor, FiX, FiImage, FiEdit2, FiArrowDown } from 'react-icons/fi';
 import {
   sendMessage,
   subscribeToChatStream,
@@ -73,6 +73,12 @@ export default function ChatWindow({ bot, models, catalogError, onRefreshModels,
     if (prefill?.text) setInputPrompt(prefill.text);
   }, [prefill]);
   const messagesEndRef = useRef(null);
+  const scrollContainerRef = useRef(null);
+  // Follow the stream only while the reader is already at the bottom. Scrolling
+  // up to read something earlier turns following off; the pill below turns it
+  // back on. Mutable ref, not state: it changes on every scroll event.
+  const followRef = useRef(true);
+  const [showJumpPill, setShowJumpPill] = useState(false);
   const fileInputRef = useRef(null);
 
   const botTitle = bot?.name || 'Grok 4.5 Analyst';
@@ -101,13 +107,44 @@ export default function ChatWindow({ bot, models, catalogError, onRefreshModels,
     }
   }, [bot, defaultModel]);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const NEAR_BOTTOM_PX = 80;
+
+  const scrollToBottom = (behavior = 'auto') => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior });
   };
 
+  const handleThreadScroll = () => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+    followRef.current = nearBottom;
+    setShowJumpPill(!nearBottom);
+  };
+
+  const jumpToLatest = () => {
+    followRef.current = true;
+    setShowJumpPill(false);
+    scrollToBottom('smooth');
+  };
+
+  const botApprovals = pendingApprovals.filter((approval) => approval.botId === bot?.id);
+  const botTakeovers = takeoverRequests.filter((request) => request.botId === bot?.id);
+
+  // Switching bots shows a different thread: start it at the bottom.
   useEffect(() => {
-    scrollToBottom();
-  }, [activeMessages, isStreaming]);
+    followRef.current = true;
+    setShowJumpPill(false);
+    scrollToBottom('auto');
+  }, [bot?.id]);
+
+  // New content (tokens, tool cards, approval cards) only moves the view when
+  // the reader is following. Instant, not smooth: a smooth scroll per token
+  // never finishes before the next one starts.
+  useEffect(() => {
+    if (followRef.current) scrollToBottom('auto');
+  }, [activeMessages, isStreaming, botApprovals.length, botTakeovers.length]);
 
   const handleModelChange = (newModel) => {
     setActiveModel(newModel);
@@ -315,6 +352,8 @@ export default function ChatWindow({ bot, models, catalogError, onRefreshModels,
     
     setInputPrompt('');
     setSelectedImage(null);
+    followRef.current = true;
+    setShowJumpPill(false);
 
     let finalImageUrl = currentSelected?.uploadedUrl || null;
 
@@ -436,7 +475,7 @@ export default function ChatWindow({ bot, models, catalogError, onRefreshModels,
       </header>
 
       {/* Main Canvas Scrollable Chat Thread */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 relative">
+      <div ref={scrollContainerRef} onScroll={handleThreadScroll} className="flex-1 overflow-y-auto px-6 py-4 relative">
         <div className="max-w-4xl mx-auto w-full space-y-3 px-12 md:px-20">
           {/* Centered Recorded Timestamp */}
           <div className="text-center my-4">
@@ -445,7 +484,13 @@ export default function ChatWindow({ bot, models, catalogError, onRefreshModels,
             </span>
           </div>
 
-          {pendingApprovals.filter((approval) => approval.botId === bot?.id).map((approval) => (
+          {/* Message Items List */}
+          {activeMessages.map((msg) => (
+            <MessageItem key={msg.id} message={msg} botId={bot?.id} />
+          ))}
+
+          {/* Approval and takeover cards sit where the conversation currently is, not at the top. */}
+          {botApprovals.map((approval) => (
             <ApprovalCard
               key={approval.requestId}
               approval={approval}
@@ -453,7 +498,7 @@ export default function ChatWindow({ bot, models, catalogError, onRefreshModels,
             />
           ))}
 
-          {takeoverRequests.filter((request) => request.botId === bot?.id).map((request) => (
+          {botTakeovers.map((request) => (
             <div
               key={request.id}
               className="my-3 p-4 rounded-2xl border border-purple-500/30 bg-purple-500/10 shadow-xl max-w-xl"
@@ -496,11 +541,6 @@ export default function ChatWindow({ bot, models, catalogError, onRefreshModels,
             </div>
           ))}
 
-          {/* Message Items List */}
-          {activeMessages.map((msg) => (
-            <MessageItem key={msg.id} message={msg} botId={bot?.id} />
-          ))}
-
           {isStreaming && (
             <div className="flex justify-start items-center gap-3 my-3 animate-fade-in">
               <MascotAvatar type={bot?.isError ? 'warning' : 'blue'} size="sm" />
@@ -515,6 +555,27 @@ export default function ChatWindow({ bot, models, catalogError, onRefreshModels,
 
           <div ref={messagesEndRef} />
         </div>
+
+        {/* Shown after scrolling up: jump back to the live end of the thread. */}
+        {showJumpPill && (
+          <div className="sticky bottom-2 h-0 flex justify-center pointer-events-none">
+            <button
+              suppressHydrationWarning={true}
+              type="button"
+              onClick={jumpToLatest}
+              className={`pointer-events-auto -translate-y-full flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg border transition ${
+                botApprovals.length > 0
+                  ? 'bg-amber-500 text-black border-amber-400 hover:bg-amber-400'
+                  : 'bg-[#1c1c20] text-zinc-200 border-[#2b2b32] hover:bg-[#26262c]'
+              }`}
+            >
+              <FiArrowDown className="text-sm" />
+              {botApprovals.length > 0
+                ? `${botApprovals.length === 1 ? 'Approval' : `${botApprovals.length} approvals`} waiting`
+                : isStreaming ? 'Follow reply' : 'Jump to latest'}
+            </button>
+          </div>
+        )}
       </div>
 
 
